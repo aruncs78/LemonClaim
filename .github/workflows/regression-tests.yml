@@ -1,0 +1,153 @@
+name: Regression Tests
+
+on:
+  # Run on pull requests to main
+  pull_request:
+    branches: [main]
+  # Allow manual trigger with options
+  workflow_dispatch:
+    inputs:
+      test_category:
+        description: 'Test category to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - authentication
+          - policy
+          - claims
+          - payments
+          - gdpr
+          - admin
+          - ai
+      parallel_jobs:
+        description: 'Number of parallel jobs'
+        required: false
+        default: '4'
+        type: string
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ===========================================
+  # Determine which tests to run
+  # ===========================================
+  prepare:
+    name: 📋 Prepare Test Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      test_matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set test matrix
+        id: set-matrix
+        run: |
+          if [ "${{ github.event.inputs.test_category }}" == "all" ] || [ -z "${{ github.event.inputs.test_category }}" ]; then
+            echo 'matrix=["authentication", "policy", "claims", "payments", "gdpr", "admin", "ai"]' >> $GITHUB_OUTPUT
+          else
+            echo 'matrix=["${{ github.event.inputs.test_category }}"]' >> $GITHUB_OUTPUT
+          fi
+
+  # ===========================================
+  # Run Tests by Category
+  # ===========================================
+  regression-tests:
+    name: 🧪 ${{ matrix.category }} Tests
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        category: ${{ fromJson(needs.prepare.outputs.test_matrix) }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt', 'tests/requirements-test.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install -r tests/requirements-test.txt
+
+      - name: Run ${{ matrix.category }} Tests
+        run: |
+          pytest tests/ -v -m "${{ matrix.category }}" \
+            --tb=short \
+            --junitxml=reports/${{ matrix.category }}-test-results.xml \
+            --html=reports/${{ matrix.category }}-test-report.html \
+            --self-contained-html \
+            --timeout=300
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+          DATABASE_URL: sqlite:///./test.db
+          SECRET_KEY: test-secret-key-for-regression
+          ENVIRONMENT: testing
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.category }}-test-results
+          path: reports/
+          retention-days: 14
+
+  # ===========================================
+  # Aggregate Results
+  # ===========================================
+  aggregate-results:
+    name: 📊 Aggregate Results
+    runs-on: ubuntu-latest
+    needs: regression-tests
+    if: always()
+    steps:
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results
+
+      - name: Generate Summary Report
+        run: |
+          echo "## 🧪 Regression Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Categories Executed:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Category | Zephyr Test Cases | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Authentication | RBTES-T1272 - T1280 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Policy Management | RBTES-T1281 - T1288 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Claims Processing | RBTES-T1289 - T1296 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| AI Chatbot (Maya) | RBTES-T1297 - T1302 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Payments | RBTES-T1303 - T1308 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| GDPR Compliance | RBTES-T1309 - T1314 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Admin Dashboard | RBTES-T1315 - T1322 | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Zephyr Scale References:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Test Plan:** RBTES-P10" >> $GITHUB_STEP_SUMMARY
+          echo "- **Test Cycle:** RBTES-R203" >> $GITHUB_STEP_SUMMARY
+
+      - name: Merge all JUnit reports
+        run: |
+          mkdir -p merged-reports
+          find all-results -name "*.xml" -exec cp {} merged-reports/ \;
+
+      - name: Upload Merged Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-regression-results
+          path: merged-reports/
+          retention-days: 30

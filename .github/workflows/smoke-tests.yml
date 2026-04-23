@@ -1,0 +1,96 @@
+name: Smoke Tests
+
+on:
+  # Run on every push to main
+  push:
+    branches: [main]
+  # Allow manual trigger
+  workflow_dispatch:
+  # Schedule: Run daily at 6 AM UTC
+  schedule:
+    - cron: '0 6 * * *'
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  smoke-tests:
+    name: 🚀 Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-smoke-${{ hashFiles('backend/requirements.txt', 'tests/requirements-test.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-smoke-
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install -r tests/requirements-test.txt
+
+      - name: Run Smoke Tests
+        run: |
+          pytest tests/ -v -m smoke \
+            --tb=short \
+            --junitxml=reports/smoke-test-results.xml \
+            --html=reports/smoke-test-report.html \
+            --self-contained-html \
+            --timeout=120
+        env:
+          PYTHONPATH: ${{ github.workspace }}/backend
+          DATABASE_URL: sqlite:///./test.db
+          SECRET_KEY: test-secret-key-for-smoke
+          ENVIRONMENT: testing
+
+      - name: Upload Smoke Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-results-${{ github.run_number }}
+          path: reports/
+          retention-days: 7
+
+      - name: Smoke Test Summary
+        if: always()
+        run: |
+          echo "## 🚀 Smoke Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status == 'success' && '✅ All smoke tests passed!' || '❌ Some smoke tests failed!' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Cases Executed:" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1272: User Registration" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1276: User Login" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1281: Get Quote - Home Insurance" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1284: Purchase Policy" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1289: File New Claim" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1303: Create Payment Intent" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1311: GDPR Data Export" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1315: Admin Dashboard" >> $GITHUB_STEP_SUMMARY
+          echo "- RBTES-T1319: Admin Approve Claim" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Smoke Tests Failed - ' + new Date().toISOString().split('T')[0],
+              body: `## Smoke Test Failure Alert\n\n**Workflow:** ${context.workflow}\n**Run:** [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})\n**Triggered by:** ${context.eventName}\n\nPlease investigate immediately.`,
+              labels: ['bug', 'high-priority', 'automated']
+            });
+            console.log('Created issue #' + issue.data.number);

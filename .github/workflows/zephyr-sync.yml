@@ -1,0 +1,233 @@
+name: Zephyr Scale Sync
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline", "Regression Tests"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      test_cycle:
+        description: 'Zephyr Test Cycle Key'
+        required: false
+        default: 'RBTES-R203'
+
+env:
+  ZEPHYR_PROJECT_KEY: RBTES
+  ZEPHYR_TEST_PLAN: RBTES-P10
+  ZEPHYR_TEST_CYCLE: ${{ github.event.inputs.test_cycle || 'RBTES-R203' }}
+
+jobs:
+  sync-results:
+    name: 📤 Sync Results to Zephyr Scale
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download test artifacts
+        if: github.event_name == 'workflow_run'
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ${{ github.event.workflow_run.workflow_id }}
+          run_id: ${{ github.event.workflow_run.id }}
+          path: test-results
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests junitparser
+
+      - name: Parse and Upload Results to Zephyr Scale
+        env:
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+        run: |
+          python << 'EOF'
+          import os
+          import json
+          import requests
+          from datetime import datetime
+          from junitparser import JUnitXml
+          from pathlib import Path
+
+          # Zephyr Scale API configuration
+          ZEPHYR_API_TOKEN = os.environ.get('ZEPHYR_API_TOKEN')
+          JIRA_BASE_URL = os.environ.get('JIRA_BASE_URL', 'https://parasutest.atlassian.net')
+          PROJECT_KEY = os.environ.get('ZEPHYR_PROJECT_KEY', 'RBTES')
+          TEST_CYCLE = os.environ.get('ZEPHYR_TEST_CYCLE', 'RBTES-R203')
+
+          # Test case mapping (test function name -> Zephyr test case key)
+          TEST_CASE_MAPPING = {
+              # Authentication
+              'test_user_registration_valid_data': 'RBTES-T1272',
+              'test_user_registration_invalid_email': 'RBTES-T1273',
+              'test_user_registration_weak_password': 'RBTES-T1274',
+              'test_user_registration_without_gdpr_consent': 'RBTES-T1275',
+              'test_user_login_valid_credentials': 'RBTES-T1276',
+              'test_user_login_invalid_password': 'RBTES-T1277',
+              'test_user_logout': 'RBTES-T1278',
+              'test_password_reset_request': 'RBTES-T1279',
+              'test_jwt_token_refresh': 'RBTES-T1280',
+              
+              # Policy Management
+              'test_get_quote_home_insurance': 'RBTES-T1281',
+              'test_get_quote_renters_insurance': 'RBTES-T1282',
+              'test_get_quote_auto_insurance': 'RBTES-T1283',
+              'test_purchase_policy_from_quote': 'RBTES-T1284',
+              'test_view_active_policies': 'RBTES-T1285',
+              'test_update_policy_coverage': 'RBTES-T1286',
+              'test_cancel_insurance_policy': 'RBTES-T1287',
+              'test_quote_expiration_validation': 'RBTES-T1288',
+              
+              # Claims Processing
+              'test_file_new_claim_property_damage': 'RBTES-T1289',
+              'test_claim_auto_approval_low_risk': 'RBTES-T1290',
+              'test_upload_supporting_documents': 'RBTES-T1291',
+              'test_view_claim_status_and_timeline': 'RBTES-T1292',
+              'test_claim_amount_exceeds_coverage': 'RBTES-T1293',
+              'test_future_incident_date_validation': 'RBTES-T1294',
+              'test_update_submitted_claim': 'RBTES-T1295',
+              'test_ai_fraud_detection': 'RBTES-T1296',
+              
+              # AI Chatbot
+              'test_greeting_response': 'RBTES-T1297',
+              'test_quote_request_intent': 'RBTES-T1298',
+              'test_claim_filing_assistance': 'RBTES-T1299',
+              'test_claim_status_check': 'RBTES-T1300',
+              'test_chat_history_persistence': 'RBTES-T1301',
+              'test_contextual_suggestions': 'RBTES-T1302',
+              
+              # Payments
+              'test_create_payment_intent': 'RBTES-T1303',
+              'test_complete_premium_payment': 'RBTES-T1304',
+              'test_view_payment_history': 'RBTES-T1305',
+              'test_payment_summary_statistics': 'RBTES-T1306',
+              'test_request_payment_refund': 'RBTES-T1307',
+              'test_claim_payout_processing': 'RBTES-T1308',
+              
+              # GDPR
+              'test_view_consent_settings': 'RBTES-T1309',
+              'test_update_marketing_consent': 'RBTES-T1310',
+              'test_data_export_portability': 'RBTES-T1311',
+              'test_account_deletion_erasure': 'RBTES-T1312',
+              'test_deletion_blocked_active_policies': 'RBTES-T1313',
+              'test_view_audit_log': 'RBTES-T1314',
+              
+              # Admin
+              'test_dashboard_statistics': 'RBTES-T1315',
+              'test_list_all_users': 'RBTES-T1316',
+              'test_deactivate_user_account': 'RBTES-T1317',
+              'test_review_pending_claims': 'RBTES-T1318',
+              'test_approve_claim': 'RBTES-T1319',
+              'test_reject_claim': 'RBTES-T1320',
+              'test_view_analytics': 'RBTES-T1321',
+              'test_access_denied_for_non_admin': 'RBTES-T1322',
+          }
+
+          def parse_junit_results(results_dir):
+              """Parse JUnit XML files and extract test results."""
+              results = []
+              
+              for xml_file in Path(results_dir).rglob('*.xml'):
+                  try:
+                      xml = JUnitXml.fromfile(str(xml_file))
+                      for suite in xml:
+                          for case in suite:
+                              test_name = case.name
+                              
+                              # Determine status
+                              if case.result is None:
+                                  status = 'Pass'
+                              elif hasattr(case.result, 'type'):
+                                  if 'skip' in str(case.result.type).lower():
+                                      status = 'Not Executed'
+                                  else:
+                                      status = 'Fail'
+                              else:
+                                  status = 'Fail'
+                              
+                              # Map to Zephyr test case
+                              zephyr_key = TEST_CASE_MAPPING.get(test_name)
+                              
+                              if zephyr_key:
+                                  results.append({
+                                      'testCaseKey': zephyr_key,
+                                      'testName': test_name,
+                                      'status': status,
+                                      'executionTime': case.time,
+                                      'errorMessage': str(case.result) if case.result else None
+                                  })
+                  except Exception as e:
+                      print(f"Error parsing {xml_file}: {e}")
+              
+              return results
+
+          def create_test_execution(results):
+              """Create test execution in Zephyr Scale."""
+              if not ZEPHYR_API_TOKEN:
+                  print("ZEPHYR_API_TOKEN not set. Skipping Zephyr sync.")
+                  return
+              
+              headers = {
+                  'Authorization': f'Bearer {ZEPHYR_API_TOKEN}',
+                  'Content-Type': 'application/json'
+              }
+              
+              for result in results:
+                  execution_data = {
+                      'projectKey': PROJECT_KEY,
+                      'testCaseKey': result['testCaseKey'],
+                      'testCycleKey': TEST_CYCLE,
+                      'statusName': result['status'],
+                      'executionTime': int(result.get('executionTime', 0) * 1000),
+                      'comment': f"Automated execution via GitHub Actions\n\nTest: {result['testName']}\nError: {result.get('errorMessage', 'N/A')}"
+                  }
+                  
+                  try:
+                      response = requests.post(
+                          f'{JIRA_BASE_URL}/rest/atm/1.0/testrun',
+                          headers=headers,
+                          json=execution_data
+                      )
+                      
+                      if response.status_code in [200, 201]:
+                          print(f"✅ Updated {result['testCaseKey']}: {result['status']}")
+                      else:
+                          print(f"❌ Failed to update {result['testCaseKey']}: {response.text}")
+                  except Exception as e:
+                      print(f"Error updating {result['testCaseKey']}: {e}")
+
+          # Main execution
+          results_dir = 'test-results'
+          if os.path.exists(results_dir):
+              results = parse_junit_results(results_dir)
+              print(f"Found {len(results)} test results to sync")
+              
+              # Summary
+              passed = sum(1 for r in results if r['status'] == 'Pass')
+              failed = sum(1 for r in results if r['status'] == 'Fail')
+              skipped = sum(1 for r in results if r['status'] == 'Not Executed')
+              
+              print(f"\nSummary: {passed} passed, {failed} failed, {skipped} skipped")
+              
+              # Create executions
+              create_test_execution(results)
+          else:
+              print("No test results directory found")
+          EOF
+
+      - name: Generate Sync Summary
+        run: |
+          echo "## 📤 Zephyr Scale Sync Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Test Plan:** ${{ env.ZEPHYR_TEST_PLAN }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Test Cycle:** ${{ env.ZEPHYR_TEST_CYCLE }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Synced at:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "View results in [Zephyr Scale](https://parasutest.atlassian.net/projects/RBTES?selectedItem=com.atlassian.plugins.atlassian-connect-plugin:com.kanoah.test-manager__main-project-page#!/testCycle/${{ env.ZEPHYR_TEST_CYCLE }})" >> $GITHUB_STEP_SUMMARY
